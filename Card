@@ -1,59 +1,200 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-using TMPro;
-using DG.Tweening;
+using Random = UnityEngine.Random;
 
-public class Card : MonoBehaviour
+public class CardManager : MonoBehaviour
 {
-    [SerializeField] SpriteRenderer card;
-    [SerializeField] SpriteRenderer character;
-    [SerializeField] TMP_Text nameTMP;
-    [SerializeField] TMP_Text attackTMP;
-    [SerializeField] TMP_Text healthTMP;
-    [SerializeField] Sprite cardFront;
-    [SerializeField] Sprite cardBack;
+    public static CardManager Inst { get; private set; }
+    void Awake() => Inst = this;
 
-    public Item item;
-    bool isFront;
-    public PRS originPRS;
+    [SerializeField] ItemSO itemSO;
+    [SerializeField] GameObject cardPrefab;
+    [SerializeField] List<Card> myCards;
+    [SerializeField] List<Card> otherCards;
+    [SerializeField] Transform cardSpawnPoint;
+    [SerializeField] Transform myCardLeft;
+    [SerializeField] Transform myCardRight;
+    [SerializeField] Transform otherCardLeft;
+    [SerializeField] Transform otherCardRight;
 
-    public void Setup(Item item, bool isFront)
+    List<Item> itemBuffer;
+    Card selectCard;
+    bool isMyCardDrag;
+    bool onMyCardArea;
+
+    public Item PopItem()
     {
-        this.item = item;
-        this.isFront = isFront;
+        if (itemBuffer.Count ==0)
+            SetupItemBuffer();
 
-        if (this.isFront)
+            Item item = itemBuffer[0];
+            itemBuffer.RemoveAt(0);
+            return item;
+    }
+
+    void SetupItemBuffer()
+    {
+        itemBuffer = new List<Item>(100);
+        for (int i = 0; i < itemSO.items.Length; i++)
         {
-            character.sprite = this.item.sprite;
-            nameTMP.text = this.item.name;
-            attackTMP.text = this.item.attack.ToString();
-            healthTMP.text = this.item.health.ToString();
+            Item item = itemSO.items[i];
+            for (int j = 0; j < item.percent; j++)
+                itemBuffer.Add(item);
         }
-        else
+
+        for (int i = 0; i < itemBuffer.Count; i++)
         {
+            int rand = Random.Range(i, itemBuffer.Count);
+            Item temp = itemBuffer[i];
+            itemBuffer[i] = itemBuffer[rand];
+            itemBuffer[rand] = temp;
+        }
+    }
+
+
+    // Start is called before the first frame update
+    void Start()
+    {
+        SetupItemBuffer();
+        TurnManager.OnAddCard += AddCard;
+    }
+
+    void OnDestroy()
+    {
+        TurnManager.OnAddCard -= AddCard;
+    }
+
+    void Update()
+    {
+        if (isMyCardDrag)
+            CardDrag();
+
+        DetectCardArea();
+    }
+
+    void AddCard(bool isMine)
+    {
+        var cardObject = Instantiate(cardPrefab, cardSpawnPoint.position, Utils.QI);
+        var card = cardObject.GetComponent<Card>();
+        card.Setup(PopItem(), isMine);
+        (isMine ? myCards : otherCards).Add(card);
+
+        SetOriginOrder(isMine);
+        CardAlignment(isMine);
+    }
+
+    void SetOriginOrder(bool isMine)
+    {
+        int count = isMine ? myCards.Count : otherCards.Count;
+        for (int i = 0; i < count; i++)
+        {
+            var targetCard = isMine ? myCards[i] : otherCards[i];
+            targetCard?.GetComponent<Order>().SetOriginOrder(i);
+        }
+    }
+
+    void CardAlignment(bool isMine)
+    {
+        List<PRS> originCardPRSs = new List<PRS>();
+        if (isMine)
+            originCardPRSs = RoundAlignment(myCardLeft, myCardRight, myCards.Count, 0.5f, Vector3.one * 1.9f);
+        else
+            originCardPRSs = RoundAlignment(otherCardLeft, otherCardRight, otherCards.Count, -0.5f, Vector3.one * 1.9f);
+
+
+        var targetCards = isMine ? myCards : otherCards;
+        for (int i = 0; i < targetCards.Count; i++)
+        {
+            var targetCard = targetCards[i];
+
+            targetCard.originPRS = originCardPRSs[i];
+            targetCard.MoveTransform(targetCard.originPRS, true, 0.7f);
+        }
+    }
+
+    List<PRS> RoundAlignment(Transform leftTr, Transform rightTr, int objCount, float height, Vector3 scale)
+    {
+        float[] objLerps = new float[objCount];
+        List<PRS> results = new List<PRS>(objCount);
+
+        switch (objCount)
+        {
+            case 1: objLerps = new float[] { 0.5f }; break;
+            case 2: objLerps = new float[] { 0.27f, 0.73f }; break;
+            case 3: objLerps = new float[] { 0.1f, 0.5f, 0.9f }; break;
+            default:
+                float interval = 1f / (objCount - 1);
+                for (int i = 0; i < objCount; i++)
+                    objLerps[i] = interval * i;
+                break;
+
+        }
+
+        for (int i = 0; i < objCount; i++)
+        {
+            var targetPos = Vector3.Lerp(leftTr.position, rightTr.position, objLerps[i]);
+            var targetRot = Utils.QI;
+            if (objCount >= 4)
             {
-                card.sprite = cardBack;
-                nameTMP.text = "";
-                attackTMP.text = "";
-                healthTMP.text = "";
+                float curve = Mathf.Sqrt(Mathf.Pow(height, 2) - Mathf.Pow(objLerps[i] - 0.5f, 2));
+                curve = height >= 0 ? curve : -curve;
+                targetPos.y += curve;
+                targetRot = Quaternion.Slerp(leftTr.rotation, rightTr.rotation, objLerps[i]);
             }
+            results.Add(new PRS(targetPos, targetRot, scale));
         }
+        return results;
     }
 
-    public void MoveTransform(PRS prs, bool useDotween, float dotweenTime = 0)
+    #region MyCard
+
+    public void CardMouseOver(Card card)
     {
-        if (useDotween)
+        selectCard = card;
+        EnlargeCard(true, card);
+    }
+
+    public void CardMouseExit(Card card)
+    {
+        EnlargeCard(false, card);
+    }
+
+    public void CardMouseDown()
+    {
+        isMyCardDrag = true;
+    }
+
+    public void CardMouseUp()
+    {
+        isMyCardDrag = false;
+    }
+
+    void CardDrag()
+    {
+
+    }
+
+    void DetectCardArea()
+    {
+        RaycastHit2D[] hits = Physics2D.RaycastAll(Utils.MousePos, Vector3.forward);
+        int layer = LayerMask.NameToLayer("MyCardArea");
+        onMyCardArea = ArrayList.Exists(hits, x => x.collider.gameObject.layer == layer);
+    }
+
+    void EnlargeCard(bool isEnlarge, Card card)
+    {
+        if (isEnlarge)
         {
-            transform.DOMove(prs.pos, dotweenTime);
-            transform.DORotateQuaternion(prs.rot, dotweenTime);
-            transform.DOScale(prs.scale, dotweenTime);
+            Vector3 enlargePos = new Vector3(card.originPRS.pos.x, -4.8f, -10f);
+            card.MoveTransform(new PRS(enlargePos, Utils.QI, Vector3.one * 3.5f), false);
         }
         else
-        {
-            transform.position = prs.pos;
-            transform.rotation = prs.rot;
-            transform.localScale = prs.scale;
-        }
+            card.MoveTransform(card.originPRS,false);
+
+        card.GetComponent<Order>().SetMostFrontOrder(isEnlarge);
     }
+
+    #endregion
 }
